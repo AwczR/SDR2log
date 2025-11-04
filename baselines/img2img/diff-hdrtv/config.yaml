@@ -25,7 +25,7 @@ training:
   sample_every_epochs: 5
   sample_k: 8
   ckpt_root: ckpt
-  exp_name: exp_aces
+  exp_name: exp_20251104
   resume: null
   main_metric: psnr     
 
