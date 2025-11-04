@@ -17,6 +17,8 @@ import math
 import os
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +35,8 @@ try:
     from torchvision.utils import save_image
 except Exception:
     save_image = None  # fallback later
+
+BARK_PUSH_URL = os.environ.get("BARK_URL") or os.environ.get("BARK_ENDPOINT")
 
 # -----------------------------
 # Small helpers
@@ -108,6 +112,33 @@ def _gather_env(seed: int) -> dict:
     except Exception:
         env["git_commit"] = None
     return env
+
+
+def _notify_bark(title: str, body: str):
+    if not BARK_PUSH_URL:
+        return
+    try:
+        base = BARK_PUSH_URL.strip()
+        if not base:
+            return
+        if "://" not in base:
+            base = f"https://api.day.app/{base.lstrip('/')}"
+        parsed = urllib.parse.urlparse(base)
+        if parsed.netloc:
+            segments = [seg for seg in parsed.path.split('/') if seg]
+            if segments:
+                token = segments[0]
+                base = urllib.parse.urlunparse(
+                    parsed._replace(path='/' + token, params='', query='', fragment='')
+                )
+        base = base.rstrip("/")
+        encoded_title = urllib.parse.quote(title)
+        encoded_body = urllib.parse.quote(body)
+        url = f"{base}/{encoded_title}/{encoded_body}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            resp.read()
+    except Exception as exc:  # pragma: no cover
+        print(f"[Warn] Bark notification failed: {exc}")
 
 
 # -----------------------------
@@ -388,6 +419,7 @@ def train(cfg: dict):
         for epoch in range(start_epoch, epochs):
             t0_epoch = time.time()
             optimizer.zero_grad(set_to_none=True)
+            last_train_loss: Optional[float] = None
 
             pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"epoch {epoch}")
             for it, batch in pbar:
@@ -402,6 +434,7 @@ def train(cfg: dict):
                     pred = out['y']
                     loss_dict = criterion(pred, y)
                     loss = loss_dict['loss_total'] / grad_accum
+                    last_train_loss = float(loss_dict['loss_total'].item())
 
                 scaler.scale(loss).backward()
 
@@ -434,6 +467,7 @@ def train(cfg: dict):
                 scheduler.step()
 
             # ---- validation ----
+            val_stats = {}
             if val_loader is not None:
                 val_stats = run_validation(model, val_loader, device, amp, metrics_bundle)
                 val_log = {"epoch": epoch, **val_stats}
@@ -480,6 +514,31 @@ def train(cfg: dict):
             best_str = f"{best_val:.3f}" if best_val != -float('inf') else "N/A"
             print(f"Epoch {epoch+1}/{epochs} done in {t1_epoch - t0_epoch:.1f}s. "
                   f"Best {main_metric}: {best_str}")
+
+            # ---- Bark notification ----
+            bark_interval = int(cfg.get("training", {}).get("bark_every_epochs", 10))
+            if BARK_PUSH_URL and bark_interval > 0 and ((epoch + 1) % bark_interval == 0):
+                body_parts = []
+                if last_train_loss is not None:
+                    body_parts.append(f"train_loss={last_train_loss:.4f}")
+                if val_stats:
+                    metric_items = []
+                    for k, v in val_stats.items():
+                        if isinstance(v, (int, float)):
+                            if isinstance(v, float):
+                                metric_items.append(f"{k}={v:.4f}")
+                            else:
+                                metric_items.append(f"{k}={v}")
+                    if metric_items:
+                        body_parts.append("val " + ", ".join(metric_items))
+                if best_val != -float('inf'):
+                    body_parts.append(f"best_{main_metric}={best_val:.4f}")
+                elif body_parts == []:
+                    body_parts.append("No metrics available")
+                _notify_bark(
+                    title=f"Epoch {epoch+1}/{epochs}",
+                    body=" | ".join(body_parts)
+                )
 
         # ---- final eval summary ----
         if val_loader is not None:
