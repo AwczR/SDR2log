@@ -1,12 +1,12 @@
 paths:
-  dataloader: ./libs/dataloaders/hdm-hdr-2023/dataloader.py
+  dataloader: /home/xudongran/workspace/SDR2log/libs/dataloaders/hdm-hdr-2023/dataloader.py
   losses:
-    - path: ./libs/losses/l1_loss.py
+    - path: /home/xudongran/workspace/SDR2log/libs/losses/l1_loss.py
       weight: 1.0
   metrics:
-    - ./libs/metrics/psnr.py
-    - ./libs/metrics/ssim.py
-    - ./libs/metrics/mae.py
+    - /home/xudongran/workspace/SDR2log/libs/metrics/psnr.py
+    - /home/xudongran/workspace/SDR2log/libs/metrics/ssim.py
+    - /home/xudongran/workspace/SDR2log/libs/metrics/mae.py
 
 training:
   task_mode: img
