@@ -8,12 +8,27 @@ from colour.models import (
     RGB_Colourspace,
     log_decoding_ACEScct,
     log_encoding_ACEScct,
-    log_decoding_LogC3,
-    log_encoding_LogC3,
     normalised_primary_matrix,
     oetf_BT709,
     oetf_inverse_BT709,
 )
+
+try:
+    from colour.models import (
+        log_decoding_LogC3,
+        log_encoding_LogC3,
+    )
+except ImportError:
+    from colour.models import (
+        LOG_DECODING_METHODS,
+        LOG_ENCODING_METHODS,
+    )
+
+    try:
+        log_decoding_LogC3 = LOG_DECODING_METHODS["LogC3"]
+        log_encoding_LogC3 = LOG_ENCODING_METHODS["LogC3"]
+    except KeyError as exc:  # pragma: no cover - sanity guard for unexpected versions
+        raise ImportError("colour-science installation lacks LogC3 transfer functions") from exc
 
 COLOURSPACE_NAME = {
     "AWG3": "ARRI Wide Gamut 3",
