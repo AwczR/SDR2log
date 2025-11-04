@@ -1,7 +1,7 @@
 paths:
-  dataloader: lib/data/dataloader.py
+  dataloader: ./libs/dataloaders/hdm-hdr-2023/dataloader.py
   losses:
-    - path: lib/losses/l1_loss.py
+    - path: ./libs/losses/l1_loss.py
       weight: 1.0
   metrics:
     - ./libs/metrics/psnr.py
