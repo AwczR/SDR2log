@@ -41,7 +41,7 @@ if "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
 _COLOURSPACE_OBJECTS = {
     "AWG3": colour.RGB_COLOURSPACES["ARRI Wide Gamut 3"],
     "ACESCG": colour.RGB_COLOURSPACES["ACEScg"],
-    "REC709": colour.RGB_COLOURSPACES["Rec. 709"],
+    "REC709": colour.RGB_COLOURSPACES["ITU-R BT.709"],
 }
 
 
