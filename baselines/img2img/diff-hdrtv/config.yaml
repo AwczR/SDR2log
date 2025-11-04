@@ -1,0 +1,30 @@
+paths:
+  dataloader: lib/data/dataloader.py
+  losses:
+    - path: lib/losses/l1_loss.py
+      weight: 1.0
+  metrics:
+    - ./libs/metrics/psnr.py
+    - ./libs/metrics/ssim.py
+    - ./libs/metrics/mae.py
+
+training:
+  task_mode: img
+  optimizer: adamw
+  lr: 2.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+  scheduler:
+    name: cosine
+    t_max: 50
+  epochs: 50
+  amp: true
+  grad_accum_steps: 1
+  clip_grad_norm: 1.0
+  log_every: 50
+  sample_every_epochs: 5
+  sample_k: 8
+  ckpt_root: ckpt
+  exp_name: exp_aces
+  resume: null
+  main_metric: psnr     
