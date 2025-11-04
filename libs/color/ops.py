@@ -3,26 +3,17 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-try:
-    import colour  # type: ignore
-    from colour.models import (
-        RGB_Colourspace,
-        log_decoding_ACEScct,
-        log_encoding_ACEScct,
-        normalised_primary_matrix,
-    )
-except Exception:  # pragma: no cover - colour is optional but strongly recommended
-    colour = None  # type: ignore
-
-
-LOGC3_A = 0.247189638
-LOGC3_B = 0.385537
-LOGC3_C = 0.085
-LOGC3_D = 5.367655
-LOGC3_E = 0.092809
-LOGC3_F = 0.47312
-LOGC3_CUT = 0.1496582
-LOGC3_LINEAR_CUT = 0.010591
+import colour  # type: ignore
+from colour.models import (
+    RGB_Colourspace,
+    log_decoding_ACEScct,
+    log_encoding_ACEScct,
+    log_decoding_LogC3,
+    log_encoding_LogC3,
+    normalised_primary_matrix,
+    oetf_BT709,
+    oetf_inverse_BT709,
+)
 
 COLOURSPACE_NAME = {
     "AWG3": "ARRI Wide Gamut 3",
@@ -30,7 +21,7 @@ COLOURSPACE_NAME = {
     "REC709": "Rec. 709",
 }
 
-if colour is not None and "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
+if "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
     AWG3_PRIMARIES = np.array([
         [0.7347, 0.2653],
         [0.1426, 0.8574],
@@ -83,25 +74,16 @@ def to_chw_tensor(img: np.ndarray) -> torch.FloatTensor:
     return t  # FloatTensor
 
 
-def _require_colour():
-    if colour is None:
-        raise RuntimeError("colour-science package is required for colour conversions.")
-
-
 def _logc3_to_linear_awg3(img: np.ndarray) -> np.ndarray:
     logc = np.clip(img.astype(np.float64, copy=False), 0.0, 1.0)
-    lin_high = (10 ** ((logc - LOGC3_B) / LOGC3_A) - LOGC3_C) / LOGC3_D
-    lin_low = (logc - LOGC3_E) / LOGC3_F
-    out = np.where(logc >= LOGC3_CUT, lin_high, lin_low)
-    return np.clip(out, 0.0, None)
+    lin = log_decoding_LogC3(logc)
+    return np.clip(lin.astype(np.float64, copy=False), 0.0, None)
 
 
 def _linear_awg3_to_logc3(img: np.ndarray) -> np.ndarray:
     linear = np.clip(img.astype(np.float64, copy=False), 0.0, None)
-    log_high = LOGC3_A * np.log10(LOGC3_D * linear + LOGC3_C) + LOGC3_B
-    log_low = linear * LOGC3_F + LOGC3_E
-    out = np.where(linear >= LOGC3_LINEAR_CUT, log_high, log_low)
-    return np.clip(out, 0.0, 1.0)
+    logc = log_encoding_LogC3(linear)
+    return np.clip(logc.astype(np.float64, copy=False), 0.0, 1.0)
 
 
 def _decode_to_linear(img: np.ndarray, space: str) -> tuple[np.ndarray, str]:
@@ -113,14 +95,10 @@ def _decode_to_linear(img: np.ndarray, space: str) -> tuple[np.ndarray, str]:
     if space_key == "ACESCG":
         return img.astype(np.float64, copy=False), "ACESCG"
     if space_key == "ACESCCT":
-        _require_colour()
         lin = log_decoding_ACEScct(np.clip(img, 0.0, 1.0))
         return lin.astype(np.float64, copy=False), "ACESCG"
     if space_key in ("REC709", "BT709"):
-        _require_colour()
-        cs = colour.RGB_COLOURSPACES["Rec. 709"]
-        decode_fn = cs.cctf_decoding or colour.oetf_reverse_BT709
-        lin = decode_fn(np.clip(img, 0.0, 1.0))
+        lin = oetf_inverse_BT709(np.clip(img, 0.0, 1.0))
         return lin.astype(np.float64, copy=False), "REC709"
     raise NotImplementedError(f"Unsupported source space: {space}")
 
@@ -134,14 +112,10 @@ def _encode_from_linear(img: np.ndarray, space: str) -> np.ndarray:
     if space_key == "ACESCG":
         return np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
     if space_key == "ACESCCT":
-        _require_colour()
         enc = log_encoding_ACEScct(np.clip(img, 0.0, None))
         return np.clip(enc, 0.0, 1.0).astype(np.float32, copy=False)
     if space_key in ("REC709", "BT709"):
-        _require_colour()
-        cs = colour.RGB_COLOURSPACES["Rec. 709"]
-        encode_fn = cs.cctf_encoding or colour.oetf_BT709
-        enc = encode_fn(np.clip(img, 0.0, None))
+        enc = oetf_BT709(np.clip(img, 0.0, None))
         return np.clip(enc, 0.0, 1.0).astype(np.float32, copy=False)
     raise NotImplementedError(f"Unsupported destination space: {space}")
 
@@ -151,7 +125,6 @@ def _convert_linear_space(rgb: np.ndarray, src_space: str, dst_space: str) -> np
     dst_key = dst_space.upper()
     if src_key == dst_key:
         return rgb
-    _require_colour()
     try:
         src_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[src_key]]
         dst_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[dst_key]]
