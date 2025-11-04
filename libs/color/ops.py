@@ -12,9 +12,9 @@ from colour.models import (
     oetf_BT709,
     oetf_inverse_BT709,
 )
-from colour.models.logarithmic import (
-    log_decoding_LogC3,
-    log_encoding_LogC3,
+from colour.models import (
+    log_decoding_ARRILogC3,
+    log_encoding_ARRILogC3,
 )
 
 COLOURSPACE_NAME = {
@@ -78,13 +78,13 @@ def to_chw_tensor(img: np.ndarray) -> torch.FloatTensor:
 
 def _logc3_to_linear_awg3(img: np.ndarray) -> np.ndarray:
     logc = np.clip(img.astype(np.float64, copy=False), 0.0, 1.0)
-    lin = log_decoding_LogC3(logc)
+    lin = log_decoding_ARRILogC3(logc)
     return np.clip(lin.astype(np.float64, copy=False), 0.0, None)
 
 
 def _linear_awg3_to_logc3(img: np.ndarray) -> np.ndarray:
     linear = np.clip(img.astype(np.float64, copy=False), 0.0, None)
-    logc = log_encoding_LogC3(linear)
+    logc = log_encoding_ARRILogC3(linear)
     return np.clip(logc.astype(np.float64, copy=False), 0.0, 1.0)
 
 
