@@ -6,8 +6,10 @@ import torch
 try:
     import colour  # type: ignore
     from colour.models import (
+        RGB_Colourspace,
         log_decoding_ACEScct,
         log_encoding_ACEScct,
+        normalised_primary_matrix,
     )
 except Exception:  # pragma: no cover - colour is optional but strongly recommended
     colour = None  # type: ignore
@@ -27,6 +29,27 @@ COLOURSPACE_NAME = {
     "ACESCG": "ACEScg",
     "REC709": "Rec. 709",
 }
+
+if colour is not None and "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
+    AWG3_PRIMARIES = np.array([
+        [0.7347, 0.2653],
+        [0.1426, 0.8574],
+        [0.0991, -0.0308],
+    ])
+    AWG3_WHITEPOINT_NAME = "D65"
+    AWG3_WHITEPOINT = colour.CCS_ILLUMINANTS["CIE 1931 2 Degree Standard Observer"][AWG3_WHITEPOINT_NAME]
+    matrix_rgb_to_xyz = normalised_primary_matrix(AWG3_PRIMARIES, AWG3_WHITEPOINT)
+    matrix_xyz_to_rgb = np.linalg.inv(matrix_rgb_to_xyz)
+    colour.RGB_COLOURSPACES["ARRI Wide Gamut 3"] = RGB_Colourspace(
+        "ARRI Wide Gamut 3",
+        AWG3_PRIMARIES,
+        AWG3_WHITEPOINT,
+        AWG3_WHITEPOINT_NAME,
+        matrix_rgb_to_xyz,
+        matrix_xyz_to_rgb,
+        cctf_encoding=None,
+        cctf_decoding=None,
+    )
 
 
 def ensure_even_hw(img: np.ndarray, how: str = "center_crop") -> np.ndarray:
