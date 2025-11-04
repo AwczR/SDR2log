@@ -27,7 +27,8 @@ training:
   ckpt_root: ckpt
   exp_name: exp_20251104
   resume: null
-  main_metric: psnr     
+  main_metric: psnr
+  bark_every_epochs: 1     
 
 seed: 42
 
@@ -54,3 +55,5 @@ model:
     low_res: [128, 256]
     num_inference_steps: 50
     noise_std: 0.1
+
+  
