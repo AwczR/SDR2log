@@ -17,12 +17,6 @@ from colour.models import (
     log_encoding_ARRILogC3,
 )
 
-COLOURSPACE_NAME = {
-    "AWG3": "ARRI Wide Gamut 3",
-    "ACESCG": "ACEScg",
-    "REC709": "Rec. 709",
-}
-
 if "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
     AWG3_PRIMARIES = np.array([
         [0.7347, 0.2653],
@@ -43,6 +37,12 @@ if "ARRI Wide Gamut 3" not in colour.RGB_COLOURSPACES:
         cctf_encoding=None,
         cctf_decoding=None,
     )
+
+_COLOURSPACE_OBJECTS = {
+    "AWG3": colour.RGB_COLOURSPACES["ARRI Wide Gamut 3"],
+    "ACESCG": colour.RGB_COLOURSPACES["ACEScg"],
+    "REC709": colour.RGB_COLOURSPACES["Rec. 709"],
+}
 
 
 def ensure_even_hw(img: np.ndarray, how: str = "center_crop") -> np.ndarray:
@@ -128,8 +128,8 @@ def _convert_linear_space(rgb: np.ndarray, src_space: str, dst_space: str) -> np
     if src_key == dst_key:
         return rgb
     try:
-        src_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[src_key]]
-        dst_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[dst_key]]
+        src_cs = _COLOURSPACE_OBJECTS[src_key]
+        dst_cs = _COLOURSPACE_OBJECTS[dst_key]
     except KeyError as exc:
         raise NotImplementedError(f"Unsupported colourspace transform: {src_space} -> {dst_space}") from exc
     shp = rgb.shape

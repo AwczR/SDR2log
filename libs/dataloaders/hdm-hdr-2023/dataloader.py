@@ -55,6 +55,11 @@ class ImgPairFromLogC3(Dataset):
         lut_dir = data_cfg.get("lut_dir", os.path.join(self.root, "LUTs_for_conversion_from_LogCv3-Camera-Footage_to_HLG_and_PQ"))
         self.space_in = data_cfg.get("space_in", "LogC3")
         self.space_out = data_cfg.get("space_out", self.space_in)  # 若暂未实现 ACEScct 变换，保持一致更稳妥
+        valid_spaces = {"LogC3", "ACEScct", "ACEScg", "Rec709"}
+        if self.space_in not in valid_spaces:
+            raise ValueError(f"Unsupported space_in: {self.space_in}")
+        if self.space_out not in valid_spaces:
+            raise ValueError(f"Unsupported space_out: {self.space_out}")
         self.sdr_use_lut = True
 
         if sdr_from == "hlg":

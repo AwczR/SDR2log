@@ -39,8 +39,8 @@
     "path_sdr": str,           # 文件路径
     "path_hdr": str,           # 文件路径
     "size": (H, W),
-    "space_in": str,           # 源空间（例如 'ACEScct'）
-    "space_out": str,          # 目标空间（例如 'ACEScct'）
+    "space_in": str,           # 源空间（仅支持 'LogC3'）
+    "space_out": str,          # 目标空间（仅支持 'LogC3'/'ACEScct'/'ACEScg'/'Rec709'）
   }
 }
 ```
@@ -60,8 +60,8 @@
     "size": (H, W),
     "path_sdr": str,
     "path_hdr": str,
-    "space_in": str,
-    "space_out": str,
+    "space_in": str,           # 仅支持 'LogC3'
+    "space_out": str,          # 仅支持 'LogC3'/'ACEScct'/'ACEScg'/'Rec709'
   }
 }
 ```
