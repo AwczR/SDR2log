@@ -20,6 +20,14 @@
 | `split` | `str` | `"train"`, `"val"`, `"test"` 之一。用于选择对应的数据划分。 |
 | `mode` | `str` | `"img"` 或 `"vid"`，指定加载图像对或视频对。<br>若当前数据集不支持 `vid` 模式，必须抛出 `NotImplementedError`。 |
 
+#### `data` 配置关键字段（HdM HDR 2023）
+- `root`: TIFF 根目录。
+- `train_ratio`: 初次构建时用于 **train+val 与 test** 的比例（默认 `0.9`）。
+- `val_ratio`: 在训练集合内切出验证集的比例（默认 `0.1`，基于 `train_ratio` 结果再划分）。
+- `split_seed`: 划分随机种子（默认继承全局 `cfg["seed"]`）。
+- `split_cache`: 划分缓存路径（默认 `root/splits_hdm_hdr_2023.json`），后续运行将复用该文件，实现稳定的 train/val/test。
+- 其余字段（如 `sdr_from`, `lut_dir`, `space_in`, `space_out`, `augment`）沿旧版含义保持不变。
+
 #### 返回
 一个 `torch.utils.data.DataLoader` 对象，迭代返回以下两种样本格式之一：
 

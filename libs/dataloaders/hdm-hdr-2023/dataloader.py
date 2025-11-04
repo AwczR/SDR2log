@@ -1,8 +1,9 @@
 # lib/dataloaders/hdm-hdr-2023/dataloader.py
 import os
 import glob
+import json
 import random
-from typing import Dict, Any
+from typing import Dict, Any, List
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -30,9 +31,8 @@ class ImgPairFromLogC3(Dataset):
         if not self.root or not os.path.isdir(self.root):
             raise FileNotFoundError(f"root not found: {self.root}")
 
-        # 切分规则：简单按文件名排序 + 固定比例/列表
+        # 切分：随机划分 train/val/test，并在磁盘缓存
         self.split = split
-        self.train_ratio = float(data_cfg.get("train_ratio", 0.9))
         all_tiffs = sorted(
             glob.glob(os.path.join(self.root, "*.tif")) +
             glob.glob(os.path.join(self.root, "*.tiff"))
@@ -40,15 +40,23 @@ class ImgPairFromLogC3(Dataset):
         if len(all_tiffs) == 0:
             raise FileNotFoundError(f"No TIFF found under {self.root}")
 
-        # 简单 split：前 90% 训练，其余验证/测试（若你有 index 文件可在此替换）
-        n = len(all_tiffs)
-        n_train = int(round(n * self.train_ratio))
-        if split == "train":
-            self.paths = all_tiffs[:n_train]
-        elif split in ("val", "test"):
-            self.paths = all_tiffs[n_train:]
-        else:
+        split_seed = int(data_cfg.get("split_seed", cfg.get("seed", 42)))
+        train_ratio = float(data_cfg.get("train_ratio", 0.9))
+        val_ratio = float(data_cfg.get("val_ratio", 0.1))
+        split_cache = data_cfg.get(
+            "split_cache",
+            os.path.join(self.root, "splits_hdm_hdr_2023.json")
+        )
+        self.paths_map = self._load_or_create_splits(
+            all_tiffs,
+            split_cache,
+            split_seed,
+            train_ratio,
+            val_ratio,
+        )
+        if split not in self.paths_map:
             raise ValueError(f"Invalid split: {split}")
+        self.paths = self.paths_map[split]
 
         # 选择“伪SDR”来源
         sdr_from = data_cfg.get("sdr_from", "hlg")  # "hlg" | "pq" | "custom" | "rec709"
@@ -94,6 +102,57 @@ class ImgPairFromLogC3(Dataset):
 
     def __len__(self):
         return len(self.paths)
+
+    @staticmethod
+    def _load_or_create_splits(all_paths: List[str],
+                               cache_path: str,
+                               seed: int,
+                               train_ratio: float,
+                               val_ratio: float) -> Dict[str, List[str]]:
+        if os.path.isfile(cache_path):
+            with open(cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            splits = payload.get("splits", payload)
+            for key in list(splits.keys()):
+                splits[key] = [p for p in splits[key] if os.path.isfile(p)]
+            return splits
+
+        rng = random.Random(seed)
+        shuffled = list(all_paths)
+        rng.shuffle(shuffled)
+
+        n = len(shuffled)
+        if n == 0:
+            return {"train": [], "val": [], "test": []}
+
+        trainval_count = max(1, min(n - 1, int(round(n * train_ratio)))) if n > 1 else n
+        trainval = shuffled[:trainval_count]
+        test = shuffled[trainval_count:]
+        if not test:
+            test = trainval[-1:]
+            trainval = trainval[:-1]
+
+        if len(trainval) <= 1:
+            val = []
+            train = trainval
+        else:
+            val_count = int(round(len(trainval) * val_ratio))
+            val_count = max(1, min(len(trainval) - 1, val_count))
+            val = trainval[:val_count]
+            train = trainval[val_count:]
+
+        splits = {"train": train, "val": val, "test": test}
+        cache_dir = os.path.dirname(cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "seed": seed,
+                "train_ratio": train_ratio,
+                "val_ratio": val_ratio,
+                "splits": splits,
+            }, f, ensure_ascii=False, indent=2)
+        return splits
 
     def _random_crop_even(self, img: np.ndarray, crop: tuple):
         """中心或随机裁剪为偶数尺寸；img: [H,W,3]"""
