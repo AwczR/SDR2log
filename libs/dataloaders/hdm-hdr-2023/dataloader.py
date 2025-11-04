@@ -20,8 +20,7 @@ class ImgPairFromLogC3(Dataset):
     """
     从 LogC3/AWG3 的 TIFF 构造 (sdr, hdr) 图像对（img-only）。
     - hdr: 以原始 LogC3 为“目标”，或经 convert_space 到指定训练空间。
-    - sdr: 用提供的 3D LUT (LogC3->HLG/PQ/自定义) 在 LogC3 域上渲染得到，再可选 convert_space。
-    说明：若你没有 Rec.709 LUT，此“sdr”严格上是“渲染版（HLG/PQ）”，不是传统 SDR。
+    - sdr: 通过 3D LUT (LogC3->HLG/PQ/自定义) 或内置色彩转换 (LogC3->Rec709) 生成“伪SDR”。
     """
 
     def __init__(self, cfg: Dict[str, Any], split: str):
@@ -52,10 +51,11 @@ class ImgPairFromLogC3(Dataset):
             raise ValueError(f"Invalid split: {split}")
 
         # 选择“伪SDR”来源
-        sdr_from = data_cfg.get("sdr_from", "hlg")  # "hlg" | "pq" | "custom"
+        sdr_from = data_cfg.get("sdr_from", "hlg")  # "hlg" | "pq" | "custom" | "rec709"
         lut_dir = data_cfg.get("lut_dir", os.path.join(self.root, "LUTs_for_conversion_from_LogCv3-Camera-Footage_to_HLG_and_PQ"))
         self.space_in = data_cfg.get("space_in", "LogC3")
         self.space_out = data_cfg.get("space_out", self.space_in)  # 若暂未实现 ACEScct 变换，保持一致更稳妥
+        self.sdr_use_lut = True
 
         if sdr_from == "hlg":
             lut_path = os.path.join(lut_dir, "ARRI_LogC3-to-HLG_1K_Rec2100-D65_DW200_v2_65.cube")
@@ -63,12 +63,18 @@ class ImgPairFromLogC3(Dataset):
             lut_path = os.path.join(lut_dir, "ARRI_LogC3-to-St2084_4K_Rec2100-D65_DW200_v2_65.cube")
         elif sdr_from == "custom":
             lut_path = data_cfg.get("sdr_lut_path", "")
+        elif sdr_from == "rec709":
+            lut_path = ""
+            self.sdr_use_lut = False
         else:
             raise ValueError(f"Invalid sdr_from: {sdr_from}")
 
-        if not lut_path or not os.path.isfile(lut_path):
-            raise FileNotFoundError(f"LUT not found: {lut_path}")
-        self.sdr_lut = load_cube_lut(lut_path)
+        if self.sdr_use_lut:
+            if not lut_path or not os.path.isfile(lut_path):
+                raise FileNotFoundError(f"LUT not found: {lut_path}")
+            self.sdr_lut = load_cube_lut(lut_path)
+        else:
+            self.sdr_lut = None
         self.sdr_from = sdr_from
         self.sdr_lut_path = lut_path
 
@@ -111,8 +117,15 @@ class ImgPairFromLogC3(Dataset):
         # 1) 读 LogC3 tiff 到 [0,1]
         img_logc = read_tiff_as_float01(path)  # [H,W,3], float32 in [0,1]
 
-        # 2) sdr = 用 LUT(LogC3->HLG/PQ/自定义) 渲染
-        sdr_img = apply_3d_lut(img_logc, self.sdr_lut, mode="trilinear")
+        # 2) sdr = LUT 或色彩转换生成的伪SDR
+        if self.sdr_use_lut:
+            sdr_img = apply_3d_lut(img_logc, self.sdr_lut, mode="trilinear")
+            sdr_src_space = "HLG" if self.sdr_from == "hlg" else "PQ" if self.sdr_from == "pq" else self.space_in
+            lut_meta = os.path.basename(self.sdr_lut_path)
+        else:
+            sdr_img = convert_space(img_logc, src=self.space_in, dst="Rec709", meta={"path": path, "mode": "builtin"})
+            sdr_src_space = "Rec709"
+            lut_meta = "builtin_LogC3_to_Rec709"
 
         # 3) 可选色彩统一到 space_out（当前若 convert_space 未实现，将回退 identity）
         try:
@@ -121,8 +134,8 @@ class ImgPairFromLogC3(Dataset):
             hdr_img = img_logc  # 暂时保留在 LogC3
 
         try:
-            sdr_img = convert_space(sdr_img, src=("HLG" if self.sdr_from=="hlg" else "PQ" if self.sdr_from=="pq" else self.space_in),
-                                    dst=self.space_out, meta={"lut": self.sdr_lut_path})
+            sdr_img = convert_space(sdr_img, src=sdr_src_space,
+                                    dst=self.space_out, meta={"src": sdr_src_space, "transform": lut_meta})
         except NotImplementedError:
             # 若未实现，则维持渲染域标签
             pass
@@ -146,7 +159,7 @@ class ImgPairFromLogC3(Dataset):
             "meta": {
                 "dataset": "HdM_HDR_2023_LogC3_AWG3",
                 "is_video": False,
-                "path_sdr": f"{path} | lut={os.path.basename(self.sdr_lut_path)}",
+                "path_sdr": f"{path} | sdr_from={self.sdr_from} | ref={lut_meta}",
                 "path_hdr": path,
                 "size": (int(H), int(W)),
                 "space_in": self.space_in,

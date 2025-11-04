@@ -3,6 +3,31 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+try:
+    import colour  # type: ignore
+    from colour.models import (
+        log_decoding_ACEScct,
+        log_encoding_ACEScct,
+    )
+except Exception:  # pragma: no cover - colour is optional but strongly recommended
+    colour = None  # type: ignore
+
+
+LOGC3_A = 0.247189638
+LOGC3_B = 0.385537
+LOGC3_C = 0.085
+LOGC3_D = 5.367655
+LOGC3_E = 0.092809
+LOGC3_F = 0.47312
+LOGC3_CUT = 0.1496582
+LOGC3_LINEAR_CUT = 0.010591
+
+COLOURSPACE_NAME = {
+    "AWG3": "ARRI Wide Gamut 3",
+    "ACESCG": "ACEScg",
+    "REC709": "Rec. 709",
+}
+
 
 def ensure_even_hw(img: np.ndarray, how: str = "center_crop") -> np.ndarray:
     """
@@ -35,17 +60,117 @@ def to_chw_tensor(img: np.ndarray) -> torch.FloatTensor:
     return t  # FloatTensor
 
 
+def _require_colour():
+    if colour is None:
+        raise RuntimeError("colour-science package is required for colour conversions.")
+
+
+def _logc3_to_linear_awg3(img: np.ndarray) -> np.ndarray:
+    logc = np.clip(img.astype(np.float64, copy=False), 0.0, 1.0)
+    lin_high = (10 ** ((logc - LOGC3_B) / LOGC3_A) - LOGC3_C) / LOGC3_D
+    lin_low = (logc - LOGC3_E) / LOGC3_F
+    out = np.where(logc >= LOGC3_CUT, lin_high, lin_low)
+    return np.clip(out, 0.0, None)
+
+
+def _linear_awg3_to_logc3(img: np.ndarray) -> np.ndarray:
+    linear = np.clip(img.astype(np.float64, copy=False), 0.0, None)
+    log_high = LOGC3_A * np.log10(LOGC3_D * linear + LOGC3_C) + LOGC3_B
+    log_low = linear * LOGC3_F + LOGC3_E
+    out = np.where(linear >= LOGC3_LINEAR_CUT, log_high, log_low)
+    return np.clip(out, 0.0, 1.0)
+
+
+def _decode_to_linear(img: np.ndarray, space: str) -> tuple[np.ndarray, str]:
+    space_key = space.replace("-", "").replace(" ", "").upper()
+    if space_key == "LOGC3":
+        return _logc3_to_linear_awg3(img), "AWG3"
+    if space_key == "AWG3":
+        return img.astype(np.float64, copy=False), "AWG3"
+    if space_key == "ACESCG":
+        return img.astype(np.float64, copy=False), "ACESCG"
+    if space_key == "ACESCCT":
+        _require_colour()
+        lin = log_decoding_ACEScct(np.clip(img, 0.0, 1.0))
+        return lin.astype(np.float64, copy=False), "ACESCG"
+    if space_key in ("REC709", "BT709"):
+        _require_colour()
+        cs = colour.RGB_COLOURSPACES["Rec. 709"]
+        decode_fn = cs.cctf_decoding or colour.oetf_reverse_BT709
+        lin = decode_fn(np.clip(img, 0.0, 1.0))
+        return lin.astype(np.float64, copy=False), "REC709"
+    raise NotImplementedError(f"Unsupported source space: {space}")
+
+
+def _encode_from_linear(img: np.ndarray, space: str) -> np.ndarray:
+    space_key = space.replace("-", "").replace(" ", "").upper()
+    if space_key == "LOGC3":
+        return _linear_awg3_to_logc3(img).astype(np.float32, copy=False)
+    if space_key == "AWG3":
+        return np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
+    if space_key == "ACESCG":
+        return np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
+    if space_key == "ACESCCT":
+        _require_colour()
+        enc = log_encoding_ACEScct(np.clip(img, 0.0, None))
+        return np.clip(enc, 0.0, 1.0).astype(np.float32, copy=False)
+    if space_key in ("REC709", "BT709"):
+        _require_colour()
+        cs = colour.RGB_COLOURSPACES["Rec. 709"]
+        encode_fn = cs.cctf_encoding or colour.oetf_BT709
+        enc = encode_fn(np.clip(img, 0.0, None))
+        return np.clip(enc, 0.0, 1.0).astype(np.float32, copy=False)
+    raise NotImplementedError(f"Unsupported destination space: {space}")
+
+
+def _convert_linear_space(rgb: np.ndarray, src_space: str, dst_space: str) -> np.ndarray:
+    src_key = src_space.upper()
+    dst_key = dst_space.upper()
+    if src_key == dst_key:
+        return rgb
+    _require_colour()
+    try:
+        src_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[src_key]]
+        dst_cs = colour.RGB_COLOURSPACES[COLOURSPACE_NAME[dst_key]]
+    except KeyError as exc:
+        raise NotImplementedError(f"Unsupported colourspace transform: {src_space} -> {dst_space}") from exc
+    shp = rgb.shape
+    flat = rgb.reshape(-1, 3)
+    converted = colour.RGB_to_RGB(
+        flat,
+        src_cs,
+        dst_cs,
+        apply_cctf_decoding=False,
+        apply_cctf_encoding=False,
+    )
+    return converted.reshape(shp)
+
+
 def convert_space(img: np.ndarray, src: str, dst: str, meta=None) -> np.ndarray:
     """
-    Unified color/EOTF conversion entry.
-    Current minimal behavior:
-      - if src == dst: identity
-      - else: NotImplementedError
-    Extend here with:
-      - LogC3/AWG3 <-> ACEScct/ACEScg
-      - HLG/PQ <-> ACEScct
-      - Rec709 <-> ACEScct
+    Unified colour/EOTF conversion entry.
+    Supports:
+      - LogC3 (ARRI) <-> AWG3 linear
+      - AWG3 linear <-> ACEScg / ACEScct
+      - AWG3 linear <-> Rec.709 (BT.709)
     """
     if src == dst:
         return img
-    raise NotImplementedError(f"convert_space not implemented: {src} -> {dst}")
+
+    linear_src, src_linear_space = _decode_to_linear(img, src)
+    dst_linear_space = src_linear_space
+    if dst.replace("-", "").replace(" ", "").upper() not in ("LOGC3", src_linear_space):
+        if dst.replace("-", "").replace(" ", "").upper() == "ACESCCT":
+            dst_linear_space = "ACESCG"
+        elif dst.replace("-", "").replace(" ", "").upper() in ("REC709", "BT709"):
+            dst_linear_space = "REC709"
+        elif dst.replace("-", "").replace(" ", "").upper() == "ACESCG":
+            dst_linear_space = "ACESCG"
+        elif dst.replace("-", "").replace(" ", "").upper() == "LOGC3":
+            dst_linear_space = "AWG3"
+        else:
+            raise NotImplementedError(f"Unsupported destination space: {dst}")
+
+    converted_linear = _convert_linear_space(linear_src, src_linear_space, dst_linear_space)
+    encoded = _encode_from_linear(converted_linear, dst)
+    return encoded

@@ -28,3 +28,28 @@ training:
   exp_name: exp_aces
   resume: null
   main_metric: psnr     
+
+seed: 42
+
+data:
+  root: "/home/xudongran/workspace/SDR2log/data/HdM_HDR_2023_Original-HDR-Camera-Footage_LogC3-AWG3"
+  train_ratio: 0.9
+  batch_size: 2
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+  sdr_from: rec709
+  lut_dir: null
+  sdr_lut_path: null
+  space_in: LogC3
+  space_out: ACEScct
+  augment:
+    train_crop_size: [512, 512]
+    hflip: true
+
+model:
+  mode: aces
+  diffusion:
+    low_res: [128, 256]
+    num_inference_steps: 50
+    noise_std: 0.1
