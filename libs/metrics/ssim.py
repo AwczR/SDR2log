@@ -27,7 +27,10 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor):
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
     N, C, H, W = pred.shape
-    device, dtype = pred.device, pred.dtype
+    device = pred.device
+    dtype = torch.float32
+    pred = pred.to(dtype=dtype)
+    target = target.to(dtype=dtype)
     win = _gaussian_window(C, 11, 1.5, device=device, dtype=dtype)
     padding = 11 // 2
 

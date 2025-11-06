@@ -15,8 +15,9 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor):
     """
     Returns: {"psnr": float}, batch-averaged over N.
     """
-    pred = _to_01(pred)
-    target = _to_01(target)
+    dtype = torch.float32
+    pred = _to_01(pred).to(dtype=dtype)
+    target = _to_01(target).to(dtype=dtype)
     mse = F.mse_loss(pred, target, reduction='none')
     mse = mse.flatten(1).mean(dim=1)  # [N]
     psnr = 10.0 * torch.log10(1.0 / (mse + DEFAULT_EPS))  # data_range=1

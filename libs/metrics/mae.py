@@ -12,8 +12,9 @@ def compute_metrics(pred: torch.Tensor, target: torch.Tensor):
     """
     Returns: {"mae": float}, batch-averaged over N.
     """
-    pred = _to_01(pred)
-    target = _to_01(target)
+    dtype = torch.float32
+    pred = _to_01(pred).to(dtype=dtype)
+    target = _to_01(target).to(dtype=dtype)
     mae = torch.nn.functional.l1_loss(pred, target, reduction='none')
     mae = mae.flatten(1).mean(dim=1)  # [N]
     return {"mae": float(mae.mean().item())}
