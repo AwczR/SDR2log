@@ -291,7 +291,8 @@ def run_validation(model: nn.Module,
                    amp: bool,
                    metrics_bundle: MetricsBundle,
                    detach_prior: bool,
-                   use_prior: bool) -> Dict[str, float]:
+                   use_prior: bool,
+                   stage: int) -> Dict[str, float]:
     if loader is None:
         return {}
     model.eval()
@@ -308,7 +309,7 @@ def run_validation(model: nn.Module,
         y = batch['hdr'].to(device, non_blocking=True)
         with autocast():
             out = model(x, detach_prior=detach_prior, use_prior=use_prior)
-            pred = out['y']
+            pred = out['hdr_ref'] if stage == 1 else out['y']
             pred_vis = pred.clamp(0.0, 1.0)
 
         # metrics_bundle 内部已 batch-mean；这里按批大小做样本加权平均
@@ -328,7 +329,7 @@ def run_validation(model: nn.Module,
 
 
 def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, epoch: int, k: int,
-                 device: torch.device, amp: bool, detach_prior: bool, use_prior: bool):
+                 device: torch.device, amp: bool, detach_prior: bool, use_prior: bool, stage: int):
     if save_image is None:
         print("[Warn] torchvision not available; skip saving samples.")
         return
@@ -344,7 +345,7 @@ def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, ep
             y = batch['hdr'].to(device, non_blocking=True)
             with autocast():
                 out = model(x, detach_prior=detach_prior, use_prior=use_prior)
-                pred = out['y']
+                pred = out['hdr_ref'] if stage == 1 else out['y']
                 pred_vis = pred.clamp(0.0, 1.0)
             diff = torch.clamp((pred_vis - y).abs(), 0.0, 1.0)
             B = x.shape[0]
@@ -545,7 +546,7 @@ def train(cfg: dict):
 
                 with autocast():
                     out = model(x, detach_prior=detach_prior_flag, use_prior=use_prior_flag)
-                    pred = out['y']
+                    pred = out['hdr_ref'] if stage == 1 else out['y']
                     loss_dict = criterion(pred, y)
                     main_loss = loss_dict['loss_total']
                     total_loss = main_loss
@@ -591,7 +592,7 @@ def train(cfg: dict):
             # ---- validation ----
             val_stats = {}
             if val_loader is not None:
-                val_stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag)
+                val_stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag, stage)
                 val_log = {"epoch": epoch, **val_stats}
                 _write_jsonl(log_val_path, val_log)
 
@@ -617,7 +618,7 @@ def train(cfg: dict):
 
             # ---- samples ----
             if (val_loader is not None) and ((epoch + 1) % sample_every_epochs == 0):
-                dump_samples(model, val_loader, paths['samples_dir'], epoch + 1, sample_k, device, amp, detach_prior_flag, use_prior_flag)
+                dump_samples(model, val_loader, paths['samples_dir'], epoch + 1, sample_k, device, amp, detach_prior_flag, use_prior_flag, stage)
 
             # ---- save last each epoch ----
             last_payload = {
@@ -667,7 +668,7 @@ def train(cfg: dict):
 
         # ---- final eval summary ----
         if val_loader is not None:
-            stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag)
+            stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag, stage)
             with open(paths['eval_dir'] / 'summary.json', 'w', encoding='utf-8') as f:
                 json.dump(stats, f, ensure_ascii=False, indent=2)
 
