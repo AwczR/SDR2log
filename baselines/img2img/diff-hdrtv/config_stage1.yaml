@@ -43,7 +43,7 @@ data:
   root: "/home/xudongran/workspace/SDR2log/data/HdM_HDR_2023_Original-HDR-Camera-Footage_LogC3-AWG3"
   train_ratio: 0.9
   val_ratio: 0.1
-  batch_size: 10
+  batch_size: 4
   num_workers: 4
   pin_memory: true
   drop_last: true
