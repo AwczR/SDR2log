@@ -29,7 +29,7 @@ training:
   log_every: 50
   sample_every_epochs: 5
   sample_k: 8
-  ckpt_root: ckpt
+  ckpt_root: /home/xudongran/workspace/SDR2log/baselines/img2img/diff-hdrtv/ckpt
   exp_name: diffh_stage1
   resume: null
   load_prior_path: null
