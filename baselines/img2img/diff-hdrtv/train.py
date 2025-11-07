@@ -420,7 +420,7 @@ def train(cfg: dict):
     if not trainable_params:
         raise ValueError(f"No trainable parameters found for stage={stage}.")
     detach_prior_flag = _should_detach_prior(stage, detach_prior_in_stage3)
-    use_prior_flag = (stage != 3) or use_prior_in_stage3
+    use_prior_flag = (stage == 2) or (stage == 3 and use_prior_in_stage3)
 
     print(
         "[Contract] diffusion.input_range={inp}, prediction_type={pred}, noise_std={noise}, resize_mode={resize}".format(
