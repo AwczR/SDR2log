@@ -12,7 +12,7 @@ training:
   task_mode: img
   stage: 3
   detach_prior_in_stage3: true
-  use_prior_in_stage3: false
+  use_prior_in_stage3: true
   optimizer: adamw
   lr: 2.0e-4
   lr_prior: 1.0e-4
@@ -30,12 +30,12 @@ training:
   sample_every_epochs: 5
   sample_k: 8
   ckpt_root: ckpt
-  exp_name: exp_20251104
+  exp_name: diffh_stage3
   resume: null
-  load_prior_path: null
+  load_prior_path: ""
   main_metric: psnr
   lambda_ortho: 0.0
-  bark_every_epochs: 1     
+  bark_every_epochs: 1
 
 seed: 42
 
@@ -66,4 +66,3 @@ model:
     prediction_type: epsilon
     resize_mode: bicubic
 
-  

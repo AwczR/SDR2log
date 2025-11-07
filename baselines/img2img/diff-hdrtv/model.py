@@ -71,8 +71,10 @@ def _check_size(x: torch.Tensor):
     if (h % 2) or (w % 2):
         raise ValueError(f"H and W must be divisible by 2. Got H={h}, W={w}.")
 
-def _resize_to(x: torch.Tensor, size_hw: Tuple[int, int]) -> torch.Tensor:
-    return F.interpolate(x, size=size_hw, mode="bicubic", align_corners=False)
+def _resize_to(x: torch.Tensor, size_hw: Tuple[int, int], mode: str = "bicubic") -> torch.Tensor:
+    """Resize helper that keeps range untouched; mode is configurable to match Stage-2 training."""
+    interp_kwargs = {"align_corners": False} if mode in {"bilinear", "bicubic"} else {}
+    return F.interpolate(x, size=size_hw, mode=mode, **interp_kwargs)
 
 def _concat_channels(*xs: torch.Tensor) -> torch.Tensor:
     return torch.cat(xs, dim=1)
@@ -163,7 +165,7 @@ class HDRNet(nn.Module):
         x = self.body(x)
         x = self.up(x)
         x = self.tail(x)
-        return torch.clamp(x, 0.0, 1.0)
+        return x
 
 
 # -----------------------------
@@ -175,6 +177,9 @@ class DiffusionCfg:
     low_res: Tuple[int, int] = (128, 256)  # (H, W)
     num_inference_steps: int = 50
     noise_std: float = 0.1
+    input_range: Literal["zero_one", "minus_one_one"] = "zero_one"
+    prediction_type: Literal["epsilon", "v_prediction"] = "epsilon"
+    resize_mode: Literal["bicubic", "bilinear"] = "bicubic"
 
 class DiffusionPrior(nn.Module):
     """
@@ -187,8 +192,8 @@ class DiffusionPrior(nn.Module):
             raise RuntimeError("`diffusers` is required for Stage-2. Install with `pip install diffusers`.")
         self.cfg = cfg
 
+        # 不传 sample_size 以兼容 diffusers 的变分辨率实现与旧版本行为
         self.unet = UNet2DModel(
-            sample_size=cfg.low_res[0],  # 运行时会做 HxW 插值，这里给出一个尺寸参考
             in_channels=in_ch,
             out_channels=in_ch,
             block_out_channels=(base_channels, base_channels*2, base_channels*4),
@@ -199,22 +204,31 @@ class DiffusionPrior(nn.Module):
 
         self.scheduler = DDIMScheduler(
             beta_start=0.00085, beta_end=0.0120, beta_schedule="scaled_linear",
-            clip_sample=False, set_alpha_to_one=False
+            clip_sample=False, set_alpha_to_one=False,
+            prediction_type=cfg.prediction_type
         )
 
-    @torch.no_grad()
+    def _to_diffusion_range(self, x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+        if self.cfg.input_range == "zero_one":
+            return x
+        if inverse:
+            return (x + 1.0) * 0.5
+        return x * 2.0 - 1.0
+
     def forward(self, hdr_ref: torch.Tensor) -> torch.Tensor:
         b, c, h, w = hdr_ref.shape
-        lr = _resize_to(hdr_ref, self.cfg.low_res)
-        x_t = torch.clamp(lr + torch.randn_like(lr) * self.cfg.noise_std, 0.0, 1.0)
+        lr = _resize_to(hdr_ref, self.cfg.low_res, mode=self.cfg.resize_mode)
+        base = self._to_diffusion_range(lr, inverse=False)
+        x_t = base + torch.randn_like(base) * self.cfg.noise_std
 
         self.scheduler.set_timesteps(self.cfg.num_inference_steps, device=hdr_ref.device)
         for t in self.scheduler.timesteps:
             eps = self.unet(x_t, t).sample
             x_t = self.scheduler.step(eps, t, x_t).prev_sample
 
-        hdr_prior = _resize_to(x_t, (h, w))
-        return torch.clamp(hdr_prior, 0.0, 1.0)
+        hdr_prior = _resize_to(x_t, (h, w), mode=self.cfg.resize_mode)
+        hdr_prior = self._to_diffusion_range(hdr_prior, inverse=True)
+        return hdr_prior
 
 
 # -----------------------------
@@ -226,14 +240,14 @@ class XYNet(nn.Module):
         super().__init__()
         self.backbone = HDRNet(in_ch=2, out_ch=2)
     def forward(self, sdr_xy):
-        return torch.clamp(self.backbone(sdr_xy), 0.0, 1.0)
+        return self.backbone(sdr_xy)
 
 class YNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.backbone = HDRNet(in_ch=1, out_ch=1)
     def forward(self, sdr_y):
-        return torch.clamp(self.backbone(sdr_y), 0.0, 1.0)
+        return self.backbone(sdr_y)
 
 class XYRefiner(nn.Module):
     """
@@ -244,7 +258,7 @@ class XYRefiner(nn.Module):
         self.backbone = HDRNet(in_ch=in_ch, out_ch=out_ch)
     def forward(self, hdr_xy, hdr_y, hdr_prior_rgb):
         x = _concat_channels(hdr_xy, hdr_y, hdr_prior_rgb)
-        return torch.clamp(self.backbone(x), 0.0, 1.0)
+        return self.backbone(x)
 
 
 # -----------------------------
@@ -285,6 +299,15 @@ class ACESDecomposer(nn.Module):
             W = torch.vstack([R, L]).float()  # [3,3]，前两行->C，最后一行->L
             self.proj.weight.copy_(W.unsqueeze(-1).unsqueeze(-1))  # [3,3,1,1]
 
+    @torch.no_grad()
+    def apply_orthogonal_projection(self):
+        """
+        可选：保持投影矩阵的各行近似正交，训练脚本可在 optimizer.step() 后调用。
+        """
+        weight = self.proj.weight.view(3, 3)
+        Q, _ = torch.linalg.qr(weight.t(), mode='reduced')
+        self.proj.weight.copy_(Q.t().view_as(self.proj.weight))
+
     def forward(self, x_aces: torch.Tensor) -> Dict[str, torch.Tensor]:
         y = self.proj(x_aces)           # [B,3,H,W]
         C = y[:, :2, ...]               # [B,2,H,W]
@@ -297,7 +320,7 @@ class CNet(nn.Module):
         super().__init__()
         self.backbone = HDRNet(in_ch=2, out_ch=2)
     def forward(self, sdr_C):
-        return torch.clamp(self.backbone(sdr_C), 0.0, 1.0)
+        return self.backbone(sdr_C)
 
 class LNet(nn.Module):
     """L-Net: maps SDR-ACES luma-like 1ch -> HDR-ACES luma-like 1ch"""
@@ -305,7 +328,7 @@ class LNet(nn.Module):
         super().__init__()
         self.backbone = HDRNet(in_ch=1, out_ch=1)
     def forward(self, sdr_L):
-        return torch.clamp(self.backbone(sdr_L), 0.0, 1.0)
+        return self.backbone(sdr_L)
 
 class ACESRefiner3Branch(nn.Module):
     """
@@ -317,7 +340,7 @@ class ACESRefiner3Branch(nn.Module):
         self.backbone = HDRNet(in_ch=in_ch, out_ch=out_ch)
     def forward(self, hdr_C, hdr_L, hdr_prior_aces):
         x = _concat_channels(hdr_C, hdr_L, hdr_prior_aces)
-        return torch.clamp(self.backbone(x), 0.0, 1.0)
+        return self.backbone(x)
 
 
 # -----------------------------
@@ -348,6 +371,7 @@ class DiffHDRTV(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.mode = cfg.mode
+        self.detach_prior_default = False
 
         # Stage-1 (共享)
         self.hdrnet = HDRNet(in_ch=3, out_ch=3)
@@ -368,7 +392,10 @@ class DiffHDRTV(nn.Module):
         else:
             raise ValueError("cfg.mode must be 'xyY' or 'aces'.")
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def set_detach_prior_default(self, flag: bool):
+        self.detach_prior_default = bool(flag)
+
+    def forward(self, x: torch.Tensor, detach_prior: Optional[bool] = None, use_prior: Optional[bool] = None) -> Dict[str, torch.Tensor]:
         """
         x: [B,3,H,W] in [0,1]
             - mode="xyY":  SDR RGB
@@ -383,8 +410,18 @@ class DiffHDRTV(nn.Module):
         # Stage-1
         hdr_ref = self.hdrnet(x)
 
-        # Stage-2
-        hdr_prior = self.prior(hdr_ref).detach()
+        if detach_prior is None:
+            detach_prior = self.detach_prior_default
+        if use_prior is None:
+            use_prior = True
+
+        # Stage-2（可旁路）
+        if use_prior:
+            hdr_prior = self.prior(hdr_ref)
+            if detach_prior:
+                hdr_prior = hdr_prior.detach()
+        else:
+            hdr_prior = torch.zeros_like(hdr_ref)
 
         if self.mode == "xyY":
             sdr_xyY = _rgb_to_xyY(x)  # 占位：训练时请替换为你的真实管线
@@ -411,6 +448,10 @@ def build_model(
     low_res: Tuple[int, int] = (128, 256),
     num_inference_steps: int = 50,
     noise_std: float = 0.1,
+    input_range: Literal["zero_one", "minus_one_one"] = "zero_one",
+    prediction_type: Literal["epsilon", "v_prediction"] = "epsilon",
+    resize_mode: Literal["bicubic", "bilinear"] = "bicubic",
+    detach_prior_default: bool = False,
 ) -> DiffHDRTV:
     cfg = ModelCfg(
         mode=mode,
@@ -418,6 +459,11 @@ def build_model(
             low_res=low_res,
             num_inference_steps=num_inference_steps,
             noise_std=noise_std,
+            input_range=input_range,
+            prediction_type=prediction_type,
+            resize_mode=resize_mode,
         ),
     )
-    return DiffHDRTV(cfg)
+    model = DiffHDRTV(cfg)
+    model.set_detach_prior_default(detach_prior_default)
+    return model

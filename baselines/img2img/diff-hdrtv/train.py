@@ -65,14 +65,16 @@ def _dyn_import_from_path(py_path: str, symbol: Optional[str] = None):
     return getattr(module, symbol) if symbol else module
 
 
-def _seed_everything(seed: int):
+def _seed_everything(seed: int, deterministic: bool = True):
     import random
     import numpy as np
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = True
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.benchmark = not deterministic
+        torch.backends.cudnn.deterministic = deterministic
 
 
 def _ensure_dir(p: Path):
@@ -143,6 +145,64 @@ def _notify_bark(title: str, body: str):
             resp.read()
     except Exception as exc:  # pragma: no cover
         print(f"[Warn] Bark notification failed: {exc}")
+
+
+def _stage_train_targets(model: nn.Module, stage: int, detach_prior_in_stage3: bool) -> List[str]:
+    if stage == 1:
+        return ["hdrnet"]
+    if stage == 2:
+        return ["prior"]
+    if stage == 3:
+        if getattr(model, "mode", "aces") == "aces":
+            targets = ["decomp", "cnet", "lnet", "refiner_aces3"]
+        else:
+            targets = ["xynet", "ynet", "refiner_xyY"]
+        if not detach_prior_in_stage3:
+            targets.append("prior")
+        return targets
+    raise ValueError(f"Unsupported training.stage={stage}. Expected 1, 2, or 3.")
+
+
+def _apply_stage_freeze(model: nn.Module, stage: int, detach_prior_in_stage3: bool) -> List[str]:
+    targets = set(_stage_train_targets(model, stage, detach_prior_in_stage3))
+    known_attrs = [
+        "hdrnet", "prior",
+        "decomp", "cnet", "lnet", "refiner_aces3",
+        "xynet", "ynet", "refiner_xyY",
+    ]
+    enabled = []
+    for name in known_attrs:
+        module = getattr(model, name, None)
+        if module is None:
+            continue
+        requires = name in targets
+        for p in module.parameters():
+            p.requires_grad = requires
+        if requires:
+            enabled.append(name)
+    return enabled
+
+
+def _should_detach_prior(stage: int, detach_prior_in_stage3: bool) -> bool:
+    if stage == 2:
+        return False
+    if stage == 3:
+        return detach_prior_in_stage3
+    return True  # Stage-1 默认只训练 HDRNet，避免反传进 prior
+
+
+def _aces_ortho_regularizer(model: nn.Module) -> torch.Tensor:
+    if not hasattr(model, "decomp"):
+        raise AttributeError("ACES mode required for orthogonal regularization.")
+    weight = model.decomp.proj.weight.view(model.decomp.proj.weight.shape[0], -1)
+    ident = torch.eye(weight.shape[0], device=weight.device, dtype=weight.dtype)
+    diff = weight @ weight.t() - ident
+    return torch.sum(diff * diff)
+
+
+def _save_prior_only(prior: nn.Module, out_path: Path):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({'prior': prior.state_dict()}, out_path)
 
 
 # -----------------------------
@@ -229,7 +289,9 @@ def run_validation(model: nn.Module,
                    loader: Optional[DataLoader],
                    device: torch.device,
                    amp: bool,
-                   metrics_bundle: MetricsBundle) -> Dict[str, float]:
+                   metrics_bundle: MetricsBundle,
+                   detach_prior: bool,
+                   use_prior: bool) -> Dict[str, float]:
     if loader is None:
         return {}
     model.eval()
@@ -245,11 +307,12 @@ def run_validation(model: nn.Module,
         x = batch['sdr'].to(device, non_blocking=True)
         y = batch['hdr'].to(device, non_blocking=True)
         with autocast():
-            out = model(x)
-            pred = torch.clamp(out['y'], 0.0, 1.0)
+            out = model(x, detach_prior=detach_prior, use_prior=use_prior)
+            pred = out['y']
+            pred_vis = pred.clamp(0.0, 1.0)
 
         # metrics_bundle 内部已 batch-mean；这里按批大小做样本加权平均
-        m = metrics_bundle(pred, y)
+        m = metrics_bundle(pred_vis, y)
         bsz = x.shape[0]
         for k, v in m.items():
             total[k] = total.get(k, 0.0) + v * bsz
@@ -264,7 +327,8 @@ def run_validation(model: nn.Module,
     return avg
 
 
-def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, epoch: int, k: int, device: torch.device, amp: bool):
+def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, epoch: int, k: int,
+                 device: torch.device, amp: bool, detach_prior: bool, use_prior: bool):
     if save_image is None:
         print("[Warn] torchvision not available; skip saving samples.")
         return
@@ -279,14 +343,15 @@ def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, ep
             x = batch['sdr'].to(device, non_blocking=True)
             y = batch['hdr'].to(device, non_blocking=True)
             with autocast():
-                out = model(x)
-                pred = torch.clamp(out['y'], 0.0, 1.0)
-            diff = torch.clamp((pred - y).abs(), 0.0, 1.0)
+                out = model(x, detach_prior=detach_prior, use_prior=use_prior)
+                pred = out['y']
+                pred_vis = pred.clamp(0.0, 1.0)
+            diff = torch.clamp((pred_vis - y).abs(), 0.0, 1.0)
             B = x.shape[0]
             for i in range(B):
                 idx = saved + 1
                 save_image(x[i], epoch_dir / f"img_{idx:03d}_input.png")
-                save_image(pred[i], epoch_dir / f"img_{idx:03d}_pred.png")
+                save_image(pred_vis[i], epoch_dir / f"img_{idx:03d}_pred.png")
                 save_image(y[i], epoch_dir / f"img_{idx:03d}_gt.png")
                 save_image(diff[i], epoch_dir / f"img_{idx:03d}_diff.png")
                 saved += 1
@@ -305,9 +370,15 @@ def train(cfg: dict):
     if cfg.get('training', {}).get('task_mode', 'img') != 'img':
         raise NotImplementedError("This script supports image mode only (training.task_mode='img').")
 
+    tr = cfg.get('training', {})
+    stage = int(tr.get('stage', 3))
+    detach_prior_in_stage3 = bool(tr.get('detach_prior_in_stage3', True))
+    use_prior_in_stage3 = bool(tr.get('use_prior_in_stage3', False))
+    deterministic = bool(tr.get('deterministic', True))
+
     # ---- seed/device ----
     seed = int(cfg.get('seed', 42))
-    _seed_everything(seed)
+    _seed_everything(seed, deterministic=deterministic)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # ---- dataloaders ----
@@ -328,7 +399,44 @@ def train(cfg: dict):
         low_res=tuple(diff_cfg.get('low_res', [128, 256])),
         num_inference_steps=int(diff_cfg.get('num_inference_steps', 50)),
         noise_std=float(diff_cfg.get('noise_std', 0.1)),
+        input_range=str(diff_cfg.get('input_range', 'zero_one')),
+        prediction_type=str(diff_cfg.get('prediction_type', 'epsilon')),
+        resize_mode=str(diff_cfg.get('resize_mode', 'bicubic')),
     ).to(device)
+
+    load_prior_path = tr.get('load_prior_path')
+    if load_prior_path:
+        prior_path = Path(load_prior_path).expanduser()
+        if not prior_path.exists():
+            raise FileNotFoundError(f"training.load_prior_path not found: {prior_path}")
+        ckpt = torch.load(prior_path, map_location='cpu')
+        if 'prior' not in ckpt:
+            raise KeyError(f"{prior_path} must contain a 'prior' key.")
+        model.prior.load_state_dict(ckpt['prior'])
+        print(f"[Info] Loaded prior weights from {prior_path}")
+
+    trainable_module_names = _apply_stage_freeze(model, stage, detach_prior_in_stage3)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    if not trainable_params:
+        raise ValueError(f"No trainable parameters found for stage={stage}.")
+    detach_prior_flag = _should_detach_prior(stage, detach_prior_in_stage3)
+    use_prior_flag = (stage != 3) or use_prior_in_stage3
+
+    print(
+        "[Contract] diffusion.input_range={inp}, prediction_type={pred}, noise_std={noise}, resize_mode={resize}".format(
+            inp=diff_cfg.get('input_range', 'zero_one'),
+            pred=diff_cfg.get('prediction_type', 'epsilon'),
+            noise=diff_cfg.get('noise_std', 0.1),
+            resize=diff_cfg.get('resize_mode', 'bicubic'),
+        )
+    )
+    print("[Contract] training.stage={stage}, detach_prior_in_stage3={det}, use_prior_in_stage3={usep}, detach_prior_flag={flag}, trainable_modules={mods}".format(
+        stage=stage,
+        det=detach_prior_in_stage3,
+        usep=use_prior_in_stage3,
+        flag=detach_prior_flag,
+        mods=", ".join(trainable_module_names) or "None",
+    ))
 
     # ---- losses ----
     criterion = LossBundle(cfg.get('paths', {}).get('losses', None))
@@ -338,15 +446,16 @@ def train(cfg: dict):
     main_metric = str(cfg.get('training', {}).get('main_metric', 'psnr')).lower()
 
     # ---- optimizer & sched ----
-    tr = cfg.get('training', {})
     lr = float(tr.get('lr', 2e-4))
+    lr_prior = float(tr.get('lr_prior', lr))
+    opt_lr = lr_prior if stage == 2 else lr
     wd = float(tr.get('weight_decay', 0.0))
     betas = tuple(tr.get('betas', [0.9, 0.999]))
     opt_name = str(tr.get('optimizer', 'adamw')).lower()
     if opt_name == 'adamw':
-        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, weight_decay=wd)
+        optimizer = torch.optim.AdamW(trainable_params, lr=opt_lr, betas=betas, weight_decay=wd)
     elif opt_name == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, betas=betas, weight_decay=wd)
+        optimizer = torch.optim.Adam(trainable_params, lr=opt_lr, betas=betas, weight_decay=wd)
     else:
         raise ValueError(f"Unsupported optimizer: {opt_name}")
 
@@ -369,6 +478,7 @@ def train(cfg: dict):
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     grad_accum = int(tr.get('grad_accum_steps', 1))
     clip_grad = float(tr.get('clip_grad_norm', 0.0) or 0.0)
+    lambda_ortho = float(tr.get('lambda_ortho', 0.0) or 0.0)
 
     # ---- ckpt root & exp dir ----
     ckpt_root = Path(tr.get('ckpt_root', 'ckpt'))
@@ -434,18 +544,26 @@ def train(cfg: dict):
                 y = batch['hdr'].to(device, non_blocking=True)
 
                 with autocast():
-                    out = model(x)
+                    out = model(x, detach_prior=detach_prior_flag, use_prior=use_prior_flag)
                     pred = out['y']
                     loss_dict = criterion(pred, y)
-                    loss = loss_dict['loss_total'] / grad_accum
-                    last_train_loss = float(loss_dict['loss_total'].item())
+                    main_loss = loss_dict['loss_total']
+                    total_loss = main_loss
+                    if lambda_ortho > 0 and hasattr(model, "decomp"):
+                        ortho_loss = _aces_ortho_regularizer(model)
+                        loss_dict['loss_ortho'] = ortho_loss.detach()
+                        total_loss = total_loss + lambda_ortho * ortho_loss
+                    loss = total_loss / grad_accum
+                loss_dict['loss_main'] = main_loss.detach()
+                loss_dict['loss_total'] = total_loss.detach()
+                last_train_loss = float(loss_dict['loss_total'].item())
 
                 scaler.scale(loss).backward()
 
                 if (it + 1) % grad_accum == 0:
                     if clip_grad > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
+                        torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=clip_grad)
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
@@ -473,36 +591,36 @@ def train(cfg: dict):
             # ---- validation ----
             val_stats = {}
             if val_loader is not None:
-                val_stats = run_validation(model, val_loader, device, amp, metrics_bundle)
+                val_stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag)
                 val_log = {"epoch": epoch, **val_stats}
                 _write_jsonl(log_val_path, val_log)
 
                 # save best by main_metric
                 if main_metric not in val_stats:
-                    print(f"[Warn] main_metric '{main_metric}' not in validation stats. "
-                          f"Available: {list(val_stats.keys())}")
-                else:
-                    cur = float(val_stats[main_metric])
-                    is_best = cur > best_val
-                    if is_best:
-                        best_val = cur
-                        torch.save({
-                            'model': model.state_dict(),
-                            'optimizer': optimizer.state_dict(),
-                            'scaler': scaler.state_dict() if amp else None,
-                            'epoch': epoch,
-                            'global_step': global_step,
-                            'best_val': best_val,
-                            'main_metric': main_metric,
-                            'cfg': cfg,
-                        }, paths['ckpt_dir'] / f"best@{main_metric}.pt")
+                    raise KeyError(f"main_metric '{main_metric}' missing from validation stats. Available keys: {list(val_stats.keys())}")
+                cur = float(val_stats[main_metric])
+                is_best = cur > best_val
+                if is_best:
+                    best_val = cur
+                    torch.save({
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'scaler': scaler.state_dict() if amp else None,
+                        'epoch': epoch,
+                        'global_step': global_step,
+                        'best_val': best_val,
+                        'main_metric': main_metric,
+                        'cfg': cfg,
+                    }, paths['ckpt_dir'] / f"best@{main_metric}.pt")
+                    if stage == 2:
+                        _save_prior_only(model.prior, paths['ckpt_dir'] / 'prior_only.pt')
 
             # ---- samples ----
             if (val_loader is not None) and ((epoch + 1) % sample_every_epochs == 0):
-                dump_samples(model, val_loader, paths['samples_dir'], epoch + 1, sample_k, device, amp)
+                dump_samples(model, val_loader, paths['samples_dir'], epoch + 1, sample_k, device, amp, detach_prior_flag, use_prior_flag)
 
             # ---- save last each epoch ----
-            torch.save({
+            last_payload = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scaler': scaler.state_dict() if amp else None,
@@ -511,7 +629,10 @@ def train(cfg: dict):
                 'best_val': best_val,
                 'main_metric': main_metric,
                 'cfg': cfg,
-            }, paths['ckpt_dir'] / 'last.pt')
+            }
+            torch.save(last_payload, paths['ckpt_dir'] / 'last.pt')
+            if stage == 2:
+                _save_prior_only(model.prior, paths['ckpt_dir'] / 'prior_only.pt')
 
             # ---- end-of-epoch report ----
             t1_epoch = time.time()
@@ -546,7 +667,7 @@ def train(cfg: dict):
 
         # ---- final eval summary ----
         if val_loader is not None:
-            stats = run_validation(model, val_loader, device, amp, metrics_bundle)
+            stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag)
             with open(paths['eval_dir'] / 'summary.json', 'w', encoding='utf-8') as f:
                 json.dump(stats, f, ensure_ascii=False, indent=2)
 
@@ -562,6 +683,8 @@ def train(cfg: dict):
             'main_metric': main_metric,
             'cfg': cfg,
         }, paths['ckpt_dir'] / 'last.pt')
+        if stage == 2:
+            _save_prior_only(model.prior, paths['ckpt_dir'] / 'prior_only.pt')
         raise
 
 
