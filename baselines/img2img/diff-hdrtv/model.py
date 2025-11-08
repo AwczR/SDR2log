@@ -215,11 +215,19 @@ class DiffusionPrior(nn.Module):
             return (x + 1.0) * 0.5
         return x * 2.0 - 1.0
 
-    def forward(self, hdr_ref: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                hdr_ref: torch.Tensor,
+                deterministic: bool = False,
+                generator: Optional[torch.Generator] = None) -> torch.Tensor:
         b, c, h, w = hdr_ref.shape
         lr = _resize_to(hdr_ref, self.cfg.low_res, mode=self.cfg.resize_mode)
         base = self._to_diffusion_range(lr, inverse=False)
-        x_t = base + torch.randn_like(base) * self.cfg.noise_std
+        if deterministic or self.cfg.noise_std == 0.0:
+            noise = torch.zeros_like(base)
+        else:
+            randn = torch.randn_like(base, generator=generator) if generator is not None else torch.randn_like(base)
+            noise = randn * self.cfg.noise_std
+        x_t = base + noise
 
         self.scheduler.set_timesteps(self.cfg.num_inference_steps, device=hdr_ref.device)
         for t in self.scheduler.timesteps:
@@ -395,7 +403,12 @@ class DiffHDRTV(nn.Module):
     def set_detach_prior_default(self, flag: bool):
         self.detach_prior_default = bool(flag)
 
-    def forward(self, x: torch.Tensor, detach_prior: Optional[bool] = None, use_prior: Optional[bool] = None) -> Dict[str, torch.Tensor]:
+    def forward(self,
+                x: torch.Tensor,
+                detach_prior: Optional[bool] = None,
+                use_prior: Optional[bool] = None,
+                prior_deterministic: bool = False,
+                prior_generator: Optional[torch.Generator] = None) -> Dict[str, torch.Tensor]:
         """
         x: [B,3,H,W] in [0,1]
             - mode="xyY":  SDR RGB
@@ -417,7 +430,11 @@ class DiffHDRTV(nn.Module):
 
         # Stage-2（可旁路）
         if use_prior:
-            hdr_prior = self.prior(hdr_ref)
+            hdr_prior = self.prior(
+                hdr_ref,
+                deterministic=prior_deterministic,
+                generator=prior_generator,
+            )
             if detach_prior:
                 hdr_prior = hdr_prior.detach()
         else:

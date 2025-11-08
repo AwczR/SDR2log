@@ -191,6 +191,23 @@ def _should_detach_prior(stage: int, detach_prior_in_stage3: bool) -> bool:
     return True  # Stage-1 默认只训练 HDRNet，避免反传进 prior
 
 
+def _stage_supervision_key(stage: int) -> str:
+    if stage == 1:
+        return "hdr_ref"
+    if stage == 2:
+        return "hdr_prior"
+    if stage == 3:
+        return "y"
+    raise ValueError(f"Unsupported training.stage={stage}. Expected 1, 2, or 3.")
+
+
+def _select_stage_output(out: Dict[str, torch.Tensor], stage: int) -> torch.Tensor:
+    key = _stage_supervision_key(stage)
+    if key not in out:
+        raise KeyError(f"Model output missing key '{key}' for stage={stage}. Available keys: {list(out.keys())}")
+    return out[key]
+
+
 def _aces_ortho_regularizer(model: nn.Module) -> torch.Tensor:
     if not hasattr(model, "decomp"):
         raise AttributeError("ACES mode required for orthogonal regularization.")
@@ -292,7 +309,8 @@ def run_validation(model: nn.Module,
                    metrics_bundle: MetricsBundle,
                    detach_prior: bool,
                    use_prior: bool,
-                   stage: int) -> Dict[str, float]:
+                   stage: int,
+                   prior_deterministic: bool) -> Dict[str, float]:
     if loader is None:
         return {}
     model.eval()
@@ -308,8 +326,13 @@ def run_validation(model: nn.Module,
         x = batch['sdr'].to(device, non_blocking=True)
         y = batch['hdr'].to(device, non_blocking=True)
         with autocast():
-            out = model(x, detach_prior=detach_prior, use_prior=use_prior)
-            pred = out['hdr_ref'] if stage == 1 else out['y']
+            out = model(
+                x,
+                detach_prior=detach_prior,
+                use_prior=use_prior,
+                prior_deterministic=prior_deterministic,
+            )
+            pred = _select_stage_output(out, stage)
             pred_vis = pred.clamp(0.0, 1.0)
 
         # metrics_bundle 内部已 batch-mean；这里按批大小做样本加权平均
@@ -329,7 +352,8 @@ def run_validation(model: nn.Module,
 
 
 def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, epoch: int, k: int,
-                 device: torch.device, amp: bool, detach_prior: bool, use_prior: bool, stage: int):
+                 device: torch.device, amp: bool, detach_prior: bool, use_prior: bool,
+                 stage: int, prior_deterministic: bool):
     if save_image is None:
         print("[Warn] torchvision not available; skip saving samples.")
         return
@@ -344,8 +368,13 @@ def dump_samples(model: nn.Module, val_loader: DataLoader, out_samples: Path, ep
             x = batch['sdr'].to(device, non_blocking=True)
             y = batch['hdr'].to(device, non_blocking=True)
             with autocast():
-                out = model(x, detach_prior=detach_prior, use_prior=use_prior)
-                pred = out['hdr_ref'] if stage == 1 else out['y']
+                out = model(
+                    x,
+                    detach_prior=detach_prior,
+                    use_prior=use_prior,
+                    prior_deterministic=prior_deterministic,
+                )
+                pred = _select_stage_output(out, stage)
                 pred_vis = pred.clamp(0.0, 1.0)
             diff = torch.clamp((pred_vis - y).abs(), 0.0, 1.0)
             B = x.shape[0]
@@ -376,6 +405,7 @@ def train(cfg: dict):
     detach_prior_in_stage3 = bool(tr.get('detach_prior_in_stage3', True))
     use_prior_in_stage3 = bool(tr.get('use_prior_in_stage3', False))
     deterministic = bool(tr.get('deterministic', True))
+    prior_deterministic_eval = bool(tr.get('prior_deterministic_eval', True))
 
     # ---- seed/device ----
     seed = int(cfg.get('seed', 42))
@@ -545,8 +575,13 @@ def train(cfg: dict):
                 y = batch['hdr'].to(device, non_blocking=True)
 
                 with autocast():
-                    out = model(x, detach_prior=detach_prior_flag, use_prior=use_prior_flag)
-                    pred = out['hdr_ref'] if stage == 1 else out['y']
+                    out = model(
+                        x,
+                        detach_prior=detach_prior_flag,
+                        use_prior=use_prior_flag,
+                        prior_deterministic=False,
+                    )
+                    pred = _select_stage_output(out, stage)
                     loss_dict = criterion(pred, y)
                     main_loss = loss_dict['loss_total']
                     total_loss = main_loss
@@ -592,7 +627,11 @@ def train(cfg: dict):
             # ---- validation ----
             val_stats = {}
             if val_loader is not None:
-                val_stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag, stage)
+                val_stats = run_validation(
+                    model, val_loader, device, amp, metrics_bundle,
+                    detach_prior_flag, use_prior_flag, stage,
+                    prior_deterministic=prior_deterministic_eval,
+                )
                 val_log = {"epoch": epoch, **val_stats}
                 _write_jsonl(log_val_path, val_log)
 
@@ -618,7 +657,11 @@ def train(cfg: dict):
 
             # ---- samples ----
             if (val_loader is not None) and ((epoch + 1) % sample_every_epochs == 0):
-                dump_samples(model, val_loader, paths['samples_dir'], epoch + 1, sample_k, device, amp, detach_prior_flag, use_prior_flag, stage)
+                dump_samples(
+                    model, val_loader, paths['samples_dir'], epoch + 1, sample_k,
+                    device, amp, detach_prior_flag, use_prior_flag, stage,
+                    prior_deterministic=prior_deterministic_eval,
+                )
 
             # ---- save last each epoch ----
             last_payload = {
@@ -668,7 +711,11 @@ def train(cfg: dict):
 
         # ---- final eval summary ----
         if val_loader is not None:
-            stats = run_validation(model, val_loader, device, amp, metrics_bundle, detach_prior_flag, use_prior_flag, stage)
+            stats = run_validation(
+                model, val_loader, device, amp, metrics_bundle,
+                detach_prior_flag, use_prior_flag, stage,
+                prior_deterministic=prior_deterministic_eval,
+            )
             with open(paths['eval_dir'] / 'summary.json', 'w', encoding='utf-8') as f:
                 json.dump(stats, f, ensure_ascii=False, indent=2)
 
