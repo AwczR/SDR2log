@@ -117,18 +117,35 @@ class SDR2HDRAttentionUNet(nn.Module):
     def __init__(self, cfg: ModelCfg):
         super().__init__()
         self.cfg = cfg
-        self.unet = AttentionUNet(cfg.in_channels, cfg.out_channels, tuple(cfg.features))
+        self.features = tuple(cfg.features)
+        self.unet = AttentionUNet(cfg.in_channels, cfg.out_channels, self.features)
         activation = cfg.final_activation.lower()
         if activation not in {"sigmoid", "tanh", "none"}:
             raise ValueError(f"Unsupported final_activation: {cfg.final_activation}")
         self.activation = activation
+        self.downscale_factor = 2 ** len(self.features)
+
+    @staticmethod
+    def _pad_to_multiple(x: torch.Tensor, multiple: int):
+        h, w = x.shape[-2:]
+        pad_h = (multiple - (h % multiple)) % multiple
+        pad_w = (multiple - (w % multiple)) % multiple
+        if pad_h == 0 and pad_w == 0:
+            return x, (0, 0)
+        x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+        return x, (pad_h, pad_w)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        orig_h, orig_w = x.shape[-2:]
+        x, pad_hw = self._pad_to_multiple(x, self.downscale_factor)
         out = self.unet(x)
         if self.activation == "sigmoid":
             out = torch.sigmoid(out)
         elif self.activation == "tanh":
             out = (torch.tanh(out) + 1.0) * 0.5
+        pad_h, pad_w = pad_hw
+        if pad_h or pad_w:
+            out = out[..., :orig_h, :orig_w]
         return {"pred": out}
 
 
