@@ -23,8 +23,8 @@ training:
   grad_accum_steps: 1
   clip_grad_norm: 1.0
   deterministic: true
-  log_every: 50
-  bark_every_epochs: 5
+  log_every: 1
+  bark_every_epochs: 1
   ckpt_root: /home/xudongran/workspace/SDR2log/baselines/img2img/attention-unet/ckpt
   exp_name: attn_unet_default
   resume: null
@@ -37,7 +37,7 @@ data:
   root: "/home/xudongran/workspace/SDR2log/data/HdM_HDR_2023_Original-HDR-Camera-Footage_LogC3-AWG3"
   train_ratio: 0.9
   val_ratio: 0.1
-  batch_size: 8
+  batch_size: 4
   num_workers: 4
   pin_memory: true
   drop_last: true

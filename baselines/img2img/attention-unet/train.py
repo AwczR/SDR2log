@@ -212,7 +212,8 @@ def _run_epoch(model: nn.Module,
     running = 0.0
     optimizer.zero_grad(set_to_none=True)
     total_steps = len(loader)
-    for step, batch in enumerate(tqdm(loader, desc="train", leave=False)):
+    pbar = tqdm(loader, desc="train", leave=False)
+    for step, batch in enumerate(pbar):
         sdr = batch["sdr"].to(device)
         hdr = batch["hdr"].to(device)
         with autocast(enabled=use_amp, device_type=device.type):
@@ -231,6 +232,8 @@ def _run_epoch(model: nn.Module,
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
         running += loss.item() * grad_accum
+        avg_loss = running / (step + 1)
+        pbar.set_postfix({"avg_loss": f"{avg_loss:.4f}"})
     return running / max(total_steps, 1)
 
 
@@ -349,8 +352,8 @@ def main():
 
         if BARK_PUSH_URL and bark_every_epochs > 0 and ((epoch + 1) % bark_every_epochs == 0):
             body_parts = [
-                f"train={train_loss:.4f}",
-                f"val={val_loss:.4f}",
+                f"train_loss={train_loss:.4f}",
+                f"val_loss={val_loss:.4f}",
             ]
             if metrics_avg:
                 metric_str = ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
@@ -362,6 +365,9 @@ def main():
                 title=f"Epoch {epoch + 1}/{epochs}",
                 body=" | ".join(body_parts)
             )
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     print("Training finished. Best metric:", best_metric)
 
