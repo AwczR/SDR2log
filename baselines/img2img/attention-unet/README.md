@@ -13,3 +13,6 @@ cd baselines/img2img/attention-unet
 python train.py --config config.yaml --device auto
 ```
 `--device auto` selects CUDA when available. Checkpoints and logs are written under `training.ckpt_root/exp_name`.
+
+### Optional Bark push
+Set `BARK_URL` (or `BARK_ENDPOINT`) in your environment and configure `training.bark_every_epochs` in `config.yaml` to receive Bark notifications about training progress.

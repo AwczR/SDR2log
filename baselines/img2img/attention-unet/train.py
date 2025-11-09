@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -25,6 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from model import build_model  # noqa: E402
 
+BARK_PUSH_URL = os.environ.get("BARK_URL") or os.environ.get("BARK_ENDPOINT")
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Attention U-Net baseline")
@@ -169,6 +172,33 @@ def _write_jsonl(path: Path, obj: dict):
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def _notify_bark(title: str, body: str):
+    if not BARK_PUSH_URL:
+        return
+    try:
+        base = BARK_PUSH_URL.strip()
+        if not base:
+            return
+        if "://" not in base:
+            base = f"https://api.day.app/{base.lstrip('/')}"
+        parsed = urllib.parse.urlparse(base)
+        if parsed.netloc:
+            segments = [seg for seg in parsed.path.split('/') if seg]
+            if segments:
+                token = segments[0]
+                base = urllib.parse.urlunparse(
+                    parsed._replace(path='/' + token, params='', query='', fragment='')
+                )
+        base = base.rstrip("/")
+        encoded_title = urllib.parse.quote(title)
+        encoded_body = urllib.parse.quote(body or "No content")
+        url = f"{base}/{encoded_title}/{encoded_body}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            resp.read()
+    except Exception as exc:  # pragma: no cover
+        print(f"[Warn] Bark notification failed: {exc}")
+
+
 def _run_epoch(model: nn.Module,
                loader: DataLoader,
                losses: List[Tuple[float, Callable]],
@@ -280,7 +310,15 @@ def main():
     grad_accum = int(train_cfg.get("grad_accum_steps", 1))
     max_norm = float(train_cfg.get("clip_grad_norm", 0.0))
     epochs = int(train_cfg.get("epochs", 50))
+    bark_every_epochs = int(train_cfg.get("bark_every_epochs", 0))
     main_metric = train_cfg.get("main_metric", "psnr")
+    exp_name = train_cfg.get("exp_name", "attention_unet")
+
+    if BARK_PUSH_URL:
+        _notify_bark(
+            title="Attention U-Net training started",
+            body=f"exp={exp_name} | device={device.type} | epochs={epochs}"
+        )
 
     for epoch in range(start_epoch, epochs):
         train_loss = _run_epoch(model, train_loader, losses, optimizer, scaler, device, grad_accum, max_norm, use_amp)
@@ -308,6 +346,22 @@ def main():
         }
         _write_jsonl(dirs["log_dir"] / "metrics.jsonl", log_entry)
         print(f"Epoch {epoch+1}/{epochs} | train_loss={train_loss:.4f} val_loss={val_loss:.4f} {main_metric}={target_metric:.4f}")
+
+        if BARK_PUSH_URL and bark_every_epochs > 0 and ((epoch + 1) % bark_every_epochs == 0):
+            body_parts = [
+                f"train={train_loss:.4f}",
+                f"val={val_loss:.4f}",
+            ]
+            if metrics_avg:
+                metric_str = ", ".join(f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+                                       for k, v in metrics_avg.items())
+                body_parts.append(metric_str)
+            if best_metric not in (float("inf"), float("-inf")):
+                body_parts.append(f"best_{main_metric}={best_metric:.4f}")
+            _notify_bark(
+                title=f"Epoch {epoch + 1}/{epochs}",
+                body=" | ".join(body_parts)
+            )
 
     print("Training finished. Best metric:", best_metric)
 
