@@ -1,0 +1,56 @@
+paths:
+  dataloader: /home/xudongran/workspace/SDR2log/libs/dataloaders/hdm-hdr-2023/dataloader.py
+  losses:
+    - path: /home/xudongran/workspace/SDR2log/libs/losses/l1_loss.py
+      weight: 1.0
+  metrics:
+    - /home/xudongran/workspace/SDR2log/libs/metrics/psnr.py
+    - /home/xudongran/workspace/SDR2log/libs/metrics/ssim.py
+    - /home/xudongran/workspace/SDR2log/libs/metrics/mae.py
+
+training:
+  task_mode: img
+  optimizer: adamw
+  lr: 2.0e-4
+  betas: [0.9, 0.999]
+  weight_decay: 0.0
+  scheduler:
+    name: cosine
+    t_max: 50
+    eta_min: 1.0e-6
+  epochs: 50
+  amp: true
+  grad_accum_steps: 1
+  clip_grad_norm: 1.0
+  deterministic: true
+  log_every: 50
+  ckpt_root: /home/xudongran/workspace/SDR2log/baselines/img2img/attention-unet/ckpt
+  exp_name: attn_unet_default
+  resume: null
+  main_metric: psnr
+  maximize_metric: true
+
+seed: 42
+
+data:
+  root: "/home/xudongran/workspace/SDR2log/data/HdM_HDR_2023_Original-HDR-Camera-Footage_LogC3-AWG3"
+  train_ratio: 0.9
+  val_ratio: 0.1
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+  sdr_from: rec709
+  lut_dir: null
+  sdr_lut_path: null
+  space_in: LogC3
+  space_out: ACEScct
+  augment:
+    train_crop_size: [512, 512]
+    hflip: true
+
+model:
+  in_channels: 3
+  out_channels: 3
+  features: [64, 128, 256, 512]
+  final_activation: sigmoid
